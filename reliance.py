@@ -1,193 +1,197 @@
-import streamlit as st
-import pandas as pd
 import yfinance as yf
-import matplotlib.pyplot as plt
+import streamlit as st
 from datetime import datetime, timedelta
-from typing import Dict, Optional
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+from typing import Dict, Tuple, List
 
-class RelianceStockAnalyzer:
+class OptionsStrategy:
     def __init__(self):
-        self.stock_data: Optional[pd.DataFrame] = None
-        self.moving_averages: Dict[str, pd.Series] = {}
-        self.rsi: Optional[pd.Series] = None
-        self.bollinger_bands: Dict[str, pd.Series] = {}
-        self.macd: Optional[pd.Series] = None
-        self.signal: Optional[pd.Series] = None
+        self.transaction_cost = 0.001  # 0.1% transaction cost
+        self.risk_free_rate = 0.06     # 6% risk-free rate
         
-    def fetch_stock_data(self, start_date: str, end_date: str) -> None:
-        """Fetch Reliance Industries stock data"""
+    def calculate_implied_volatility(self, S: float, K: float, T: float, 
+                                   r: float, market_price: float, 
+                                   option_type: str = 'call') -> float:
+        """
+        Calculate implied volatility using Newton-Raphson method
+        """
+        def black_scholes(S: float, K: float, T: float, r: float, 
+                         sigma: float, option_type: str) -> float:
+            d1 = (np.log(S/K) + (r + sigma**2/2)*T)/(sigma*np.sqrt(T))
+            d2 = d1 - sigma*np.sqrt(T)
+            if option_type == 'call':
+                return S*norm.cdf(d1) - K*np.exp(-r*T)*norm.cdf(d2)
+            else:
+                return K*np.exp(-r*T)*norm.cdf(-d2) - S*norm.cdf(-d1)
+        
+        def objective(sigma: float) -> float:
+            return black_scholes(S, K, T, r, sigma, option_type) - market_price
+        
+        def derivative(sigma: float) -> float:
+            h = 1e-4
+            return (objective(sigma + h) - objective(sigma - h))/(2*h)
+        
+        # Newton-Raphson iteration
+        sigma = 0.2  # Initial guess
+        while abs(objective(sigma)) > 1e-6 and abs(derivative(sigma)) > 1e-6:
+            sigma = sigma - objective(sigma)/derivative(sigma)
+            
+        return sigma
+    
+    def calculate_moving_averages(self, prices: pd.Series) -> Dict[str, pd.Series]:
+        """Calculate 50-day, 100-day, and 200-day moving averages"""
+        return {
+            'MA_50': prices.rolling(window=50).mean(),
+            'MA_100': prices.rolling(window=100).mean(),
+            'MA_200': prices.rolling(window=200).mean()
+        }
+    
+    def calculate_sharpe_ratio(self, returns: pd.Series) -> float:
+        """Calculate annualized Sharpe ratio"""
+        excess_returns = returns - self.risk_free_rate/252
+        sharpe = excess_returns.mean()/returns.std()*np.sqrt(252)
+        return sharpe
+    
+    def calculate_max_drawdown(self, equity_curve: pd.Series) -> Tuple[float, int, int]:
+        """Calculate maximum drawdown and its duration"""
+        peak = equity_curve.cummax()
+        drawdown = equity_curve/peak - 1
+        max_dd = drawdown.min()
+        max_dd_end = drawdown.idxmin()
+        max_dd_start = equity_curve[:max_dd_end].idxmax()
+        
+        return abs(max_dd), len(equity_curve[max_dd_start:max_dd_end]), max_dd_start, max_dd_end
+
+class StrategyBacktest:
+    def __init__(self):
+        self.exceptions = []
+        
+    def get_options_data(self, ticker: str, date: datetime) -> pd.DataFrame:
+        """Get options data for Reliance"""
         try:
-            self.stock_data = yf.download('RELIANCE.NS', 
-                                        start=start_date, 
-                                        end=end_date)
-            if self.stock_data.empty:
-                raise ValueError("No data found for the specified date range")
+            opt = yf.Ticker(f"{ticker}.NS")
+            options = opt.options
+            df = pd.DataFrame()
+            
+            for expiry in options[:3]:  # Get next 3 months' options
+                opt_data = opt.option_chain(expiry)
+                
+                calls = opt_data.calls[['strike', 'impliedVolatility', 'lastPrice']]
+                puts = opt_data.puts[['strike', 'impliedVolatility', 'lastPrice']]
+                
+                calls['expiry'] = pd.to_datetime(expiry)
+                puts['expiry'] = pd.to_datetime(expiry)
+                
+                df = pd.concat([df, calls, puts])
+            
+            return df.sort_values('expiry')
         except Exception as e:
-            raise Exception(f"Error fetching stock data: {str(e)}")
-        
-    def calculate_moving_averages(self) -> Dict[str, pd.Series]:
-        """Calculate 50, 100, and 200 day moving averages"""
-        if self.stock_data is None:
-            raise ValueError("Stock data not loaded. Please fetch data first.")
+            self.exceptions.append(f"Error getting options data: {str(e)}")
+            return pd.DataFrame()
+    
+    def execute_strategy(self, ticker: str, start_date: datetime, end_date: datetime):
+        """Execute the strategy"""
+        try:
+            # Get historical prices
+            stock_data = yf.download(ticker + '.NS', start=start_date, end=end_date)
             
-        self.moving_averages = {
-            'MA_50': self.stock_data['Close'].rolling(window=50).mean(),
-            'MA_100': self.stock_data['Close'].rolling(window=100).mean(),
-            'MA_200': self.stock_data['Close'].rolling(window=200).mean()
-        }
-        return self.moving_averages
-    
-    def calculate_rsi(self, window: int = 14) -> pd.Series:
-        """Calculate Relative Strength Index"""
-        if self.stock_data is None:
-            raise ValueError("Stock data not loaded. Please fetch data first.")
+            # Initialize strategy objects
+            strategy = OptionsStrategy()
+            backtest = StrategyBacktest()
             
-        delta = self.stock_data['Close'].diff()
-        up, down = delta.copy(), delta.copy()
-        up[up < 0] = 0
-        down[down > 0] = 0
-        
-        roll_up = up.rolling(window).mean()
-        roll_down = down.rolling(window).mean().abs()
-        
-        RS = roll_up / roll_down
-        RSI = 100.0 - (100.0 / (1.0 + RS))
-        
-        self.rsi = RSI
-        return RSI
-    
-    def calculate_bollinger_bands(self, window: int = 20, num_std: float = 2.0) -> Dict[str, pd.Series]:
-        """Calculate Bollinger Bands"""
-        if self.stock_data is None:
-            raise ValueError("Stock data not loaded. Please fetch data first.")
+            # Calculate moving averages
+            mas = strategy.calculate_moving_averages(stock_data['Close'])
             
-        rolling_mean = self.stock_data['Close'].rolling(window).mean()
-        rolling_std = self.stock_data['Close'].rolling(window).std()
-        
-        self.bollinger_bands = {
-            'Middle': rolling_mean,
-            'Upper': rolling_mean + (rolling_std * num_std),
-            'Lower': rolling_mean - (rolling_std * num_std)
-        }
-        return self.bollinger_bands
-    
-    def calculate_macd(self, fast_window: int = 12, slow_window: int = 26, signal_window: int = 9) -> None:
-        """Calculate MACD and its signal line"""
-        if self.stock_data is None:
-            raise ValueError("Stock data not loaded. Please fetch data first.")
+            # Initialize performance metrics
+            equity_curve = pd.Series(index=stock_data.index)
+            positions = pd.DataFrame(index=stock_data.index)
             
-        exp1 = self.stock_data['Close'].ewm(span=fast_window, adjust=False).mean()
-        exp2 = self.stock_data['Close'].ewm(span=slow_window, adjust=False).mean()
-        
-        self.macd = exp1 - exp2
-        self.signal = self.macd.ewm(span=signal_window, adjust=False).mean()
-    
-    def analyze_correlations(self) -> Dict[str, float]:
-    """Analyze correlations between indicators and stock price"""
-    if self.stock_data is None or self.moving_averages == {}:
-        raise ValueError("Stock data and moving averages must be calculated first.")
-        
-    correlations = {}
-    
-    # Calculate correlations for moving averages
-    for ma_name, ma_value in self.moving_averages.items():
-        # Ensure we only use non-NaN values
-        valid_data = ma_value.dropna()
-        if not valid_data.empty:
-            correlations[f'{ma_name} Correlation'] = valid_data.corr(self.stock_data['Close'])
-    
-    # Calculate RSI correlation if available
-    if self.rsi is not None:
-        valid_rsi = self.rsi.dropna()
-        if not valid_rsi.empty:
-            correlations['RSI Correlation'] = valid_rsi.corr(self.stock_data['Close'])
-    
-    # Calculate Bollinger Bands correlations if available
-    if self.bollinger_bands:
-        for band_name, band_value in self.bollinger_bands.items():
-            valid_band = band_value.dropna()
-            if not valid_band.empty:
-                correlations[f'{band_name} Correlation'] = valid_band.corr(self.stock_data['Close'])
-    
-    # Calculate MACD correlation if available
-    if self.macd is not None:
-        valid_macd = self.macd.dropna()
-        if not valid_macd.empty:
-            correlations['MACD Correlation'] = valid_macd.corr(self.stock_data['Close'])
-    
-    return correlations
-def main():
-    """Main Streamlit application"""
-    st.title('Reliance Stock Technical Analysis')
-    
-    # Parameters
-    col1, col2 = st.columns(2)
-    with col1:
-        start_date = st.date_input('Start Date', 
-                                 value=datetime(2020, 1, 1))
-    with col2:
-        end_date = st.date_input('End Date', 
-                               value=datetime(2024, 12, 31))
-    
-    # Initialize and run analysis
-    try:
-        analyzer = RelianceStockAnalyzer()
-        analyzer.fetch_stock_data(start_date, end_date)
-        
-        # Calculate all indicators
-        analyzer.calculate_moving_averages()
-        analyzer.calculate_rsi()
-        analyzer.calculate_bollinger_bands()
-        analyzer.calculate_macd()
-        
-        # Create subplots
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 15))
-        
-        # Plot 1: Stock Price with Moving Averages
-        analyzer.stock_data['Close'].plot(ax=ax1, label='Reliance Close Price')
-        for ma_name, ma_value in analyzer.moving_averages.items():
-            ma_value.plot(ax=ax1, label=ma_name)
-        ax1.set_title('Stock Price with Moving Averages')
-        ax1.legend(loc='upper left')
-        ax1.grid(True)
-        
-        # Plot 2: Bollinger Bands
-        analyzer.stock_data['Close'].plot(ax=ax2, label='Close Price')
-        for band_name, band_value in analyzer.bollinger_bands.items():
-            band_value.plot(ax=ax2, label=band_name)
-        ax2.set_title('Bollinger Bands')
-        ax2.legend(loc='upper left')
-        ax2.grid(True)
-        
-        # Plot 3: MACD and Signal Line
-        analyzer.macd.plot(ax=ax3, label='MACD')
-        analyzer.signal.plot(ax=ax3, label='Signal Line')
-        ax3.set_title('MACD and Signal Line')
-        ax3.legend(loc='upper left')
-        ax3.grid(True)
-        
-        st.pyplot(fig)
-        
-        # Display RSI
-        st.header('Relative Strength Index (RSI)')
-        fig_rsi, ax_rsi = plt.subplots(figsize=(12, 4))
-        analyzer.rsi.plot(ax=ax_rsi)
-        ax_rsi.axhline(y=30, color='r', linestyle='--', label='Oversold (30)')
-        ax_rsi.axhline(y=70, color='g', linestyle='--', label='Overbought (70)')
-        ax_rsi.set_title('Relative Strength Index (RSI)')
-        ax_rsi.legend(loc='upper left')
-        ax_rsi.grid(True)
-        st.pyplot(fig_rsi)
-        
-        # Display correlations
-        st.header('Indicator Correlations with Stock Price')
-        correlations = analyzer.analyze_correlations()
-        for indicator, correlation in correlations.items():
-            st.write(f"{indicator}: {correlation:.3f}")
+            # Monthly strategy execution
+            monthly_dates = pd.date_range(start=start_date, end=end_date, freq='MS')
             
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
+            for date in monthly_dates:
+                # Get options data for this month
+                opt_data = backtest.get_options_data(ticker, date)
+                
+                if len(opt_data) == 0:
+                    continue
+                    
+                # Find OTM and ITM options
+                current_price = stock_data.loc[date, 'Close']
+                otm_calls = opt_data[opt_data['strike'] > current_price]
+                itm_puts = opt_data[opt_data['strike'] < current_price]
+                
+                if len(otm_calls) > 0 and len(itm_puts) > 0:
+                    # Execute strategy
+                    otm_strike = otm_calls.iloc[0]['strike']
+                    itm_strike = itm_puts.iloc[-1]['strike']
+                    
+                    # Calculate implied volatility
+                    iv_otm = strategy.calculate_implied_volatility(
+                        current_price, otm_strike, 
+                        (opt_data['expiry'].iloc[0] - date).days/252,
+                        strategy.risk_free_rate, 
+                        opt_data[opt_data['strike'] == otm_strike].iloc[0]['lastPrice'],
+                        'call'
+                    )
+                    
+                    iv_itm = strategy.calculate_implied_volatility(
+                        current_price, itm_strike,
+                        (opt_data['expiry'].iloc[0] - date).days/252,
+                        strategy.risk_free_rate,
+                        opt_data[opt_data['strike'] == itm_strike].iloc[0]['lastPrice'],
+                        'put'
+                    )
+                    
+                    # Record positions and equity
+                    positions.loc[date, 'OTM_Call_Strike'] = otm_strike
+                    positions.loc[date, 'ITM_Put_Strike'] = itm_strike
+                    positions.loc[date, 'OTM_Call_IV'] = iv_otm
+                    positions.loc[date, 'ITM_Put_IV'] = iv_itm
+            
+            return {
+                'moving_averages': mas,
+                'positions': positions,
+                'equity_curve': equity_curve,
+                'exceptions': backtest.exceptions
+            }
+        except Exception as e:
+            self.exceptions.append(f"Error executing strategy: {str(e)}")
+            return None
+
+def create_streamlit_app():
+    """Create Streamlit app for strategy visualization"""
+    st.title("Reliance Options Trading Strategy")
+    
+    ticker = st.text_input("Enter Reliance ticker symbol", value="RELIANCE")
+    start_date = st.date_input("Start Date")
+    end_date = st.date_input("End Date")
+    
+    if st.button("Run Backtest"):
+        backtest = StrategyBacktest()
+        result = backtest.execute_strategy(ticker, start_date, end_date)
+        
+        if result:
+            # Plot moving averages
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(result['moving_averages']['MA_50'], label='MA_50')
+            ax.plot(result['moving_averages']['MA_100'], label='MA_100')
+            ax.plot(result['moving_averages']['MA_200'], label='MA_200')
+            ax.legend()
+            st.pyplot(fig)
+            
+            # Display positions
+            st.write("Strategy Positions:")
+            st.table(result['positions'])
+            
+            # Display exceptions
+            if result['exceptions']:
+                st.write("Exceptions encountered:")
+                for exception in result['exceptions']:
+                    st.error(exception)
 
 if __name__ == "__main__":
-    main()   
+    create_streamlit_app()
