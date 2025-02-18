@@ -95,58 +95,85 @@ def execute_strategy(strategy: RelianceOptionsStrategy,
                              end=strategy.stock_data.index[-1],
                              freq='MS'):  # Monthly frequency
         
-        current_price = strategy.stock_data.loc[date, 'Close']
-        ma_values = {k: v.loc[date] for k, v in strategy.moving_averages.items()}
-        
-        atm_strike = round(current_price / 100) * 100
-        otm_call_strike = atm_strike + 100
-        itm_put_strike = atm_strike - 100
-        
         try:
-            iv_call = strategy.implied_volatility(
-                market_price=100,  # Assuming standardized contract size
-                S=current_price,
-                K=otm_call_strike,
-                T=30/365,  # One month expiry
-                r=risk_free_rate,
-                option_type='call')
+            current_price = strategy.stock_data.loc[date, 'Close']
+            if pd.isna(current_price):
+                st.error(f"Missing price data for {date}")
+                continue
+                
+            ma_values = {k: v.loc[date] for k, v in strategy.moving_averages.items()}
             
-            iv_put = strategy.implied_volatility(
-                market_price=100,
-                S=current_price,
-                K=itm_put_strike,
-                T=30/365,
-                r=risk_free_rate,
-                option_type='put')
+            atm_strike = round(current_price / 100) * 100
+            otm_call_strike = atm_strike + 100
+            itm_put_strike = atm_strike - 100
             
-            call_price = strategy.bsm_option_price(
-                current_price, otm_call_strike, 30/365, 
-                risk_free_rate, iv_call, 'call')
+            # Debugging information
+            st.write(f"Processing {date}:")
+            st.write(f"  Current Price: {current_price}")
+            st.write(f"  ATM Strike: {atm_strike}")
+            st.write(f"  OTM Call Strike: {otm_call_strike}")
+            st.write(f"  ITM Put Strike: {itm_put_strike}")
             
-            put_price = strategy.bsm_option_price(
-                current_price, itm_put_strike, 30/365, 
-                risk_free_rate, iv_put, 'put')
-            
-            trade_size = int(0.01 * current_equity / current_price)
-            
-            positions.append({
-                'date': date,
-                'long_otm_call': {'strike': otm_call_strike, 
-                                'price': call_price,
-                                'size': trade_size},
-                'short_itm_put': {'strike': itm_put_strike,
-                                'price': put_price,
-                                'size': trade_size},
-                'transaction_cost': transaction_cost * trade_size * current_price
-            })
-            
-            current_equity -= (call_price - put_price) * trade_size * 100 + \
-                             positions[-1]['transaction_cost']
-            equity_curve.append(current_equity)
-            
+            try:
+                iv_call = strategy.implied_volatility(
+                    market_price=100,  # Assuming standardized contract size
+                    S=current_price,
+                    K=otm_call_strike,
+                    T=30/365,  # One month expiry
+                    r=risk_free_rate,
+                    option_type='call')
+                
+                iv_put = strategy.implied_volatility(
+                    market_price=100,
+                    S=current_price,
+                    K=itm_put_strike,
+                    T=30/365,
+                    r=risk_free_rate,
+                    option_type='put')
+                
+                call_price = strategy.bsm_option_price(
+                    current_price, otm_call_strike, 30/365, 
+                    risk_free_rate, iv_call, 'call')
+                
+                put_price = strategy.bsm_option_price(
+                    current_price, itm_put_strike, 30/365, 
+                    risk_free_rate, iv_put, 'put')
+                
+                trade_size = int(0.01 * current_equity / current_price)
+                
+                positions.append({
+                    'date': date,
+                    'long_otm_call': {'strike': otm_call_strike, 
+                                    'price': call_price,
+                                    'size': trade_size},
+                    'short_itm_put': {'strike': itm_put_strike,
+                                    'price': put_price,
+                                    'size': trade_size},
+                    'transaction_cost': transaction_cost * trade_size * current_price
+                })
+                
+                current_equity -= (call_price - put_price) * trade_size * 100 + \
+                                 positions[-1]['transaction_cost']
+                equity_curve.append(current_equity)
+                
+            except Exception as e:
+                st.error(f"Error calculating options for {date}: {str(e)}")
+                continue
+                
         except Exception as e:
             st.error(f"Error processing date {date}: {str(e)}")
             continue
+    
+    if not equity_curve:
+        st.error("No valid trading positions calculated")
+        return {
+            'positions': [],
+            'equity_curve': [],
+            'sharpe_ratio': 0,
+            'max_drawdown': 0,
+            'annual_return': 0,
+            'annual_volatility': 0
+        }
     
     returns = np.diff(equity_curve) / equity_curve[:-1]
     annualized_return = np.mean(returns) * 252
