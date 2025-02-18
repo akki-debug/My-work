@@ -6,18 +6,28 @@ import matplotlib.pyplot as plt
 import scipy.stats as si
 from scipy.optimize import newton
 
-# Fetch Reliance Stock Data
+# Function to Fetch Reliance Stock Data
 def fetch_stock_data(ticker="RELIANCE.NS", period="1y"):
     stock = yf.Ticker(ticker)
     df = stock.history(period=period)
     return df
 
-# Fetch Reliance Options Chain
+# Function to Fetch Reliance Options Chain
 def fetch_options_data(ticker="RELIANCE.NS"):
     stock = yf.Ticker(ticker)
     expiries = stock.options  # Get available expirations
+
+    if not expiries:
+        st.error("No options expiries found. Market may be closed.")
+        return None, None  # Handle missing data safely
+
     latest_expiry = expiries[0]  # Nearest expiry
     options_chain = stock.option_chain(latest_expiry)
+    
+    if options_chain.calls.empty or options_chain.puts.empty:
+        st.error("No valid options data available.")
+        return None, None  # Handle empty options data safely
+    
     return options_chain.calls, options_chain.puts
 
 # Black-Scholes Model for Option Pricing
@@ -30,23 +40,34 @@ def black_scholes(S, K, T, r, sigma, option_type="call"):
     else:
         return K * np.exp(-r * T) * si.norm.cdf(-d2) - S * si.norm.cdf(-d1)
 
-# Goal Seek to Get Implied Volatility
+# Function to Compute Implied Volatility
 def implied_volatility(S, K, T, r, market_price, option_type="call"):
     func = lambda sigma: black_scholes(S, K, T, r, sigma, option_type) - market_price
     try:
         return newton(func, 0.2)  # Initial guess at 20%
     except RuntimeError:
-        return np.nan  # If Newton fails
+        return np.nan  # If Newton-Raphson fails
 
 # Strategy: Buy OTM Call, Short ITM Put
 def options_trading_strategy():
     stock_data = fetch_stock_data()
     calls, puts = fetch_options_data()
+
+    if calls is None or puts is None:
+        return {"Error": "Failed to retrieve options data."}
+
     latest_price = stock_data["Close"].iloc[-1]
 
-    # Select OTM Call and ITM Put
-    otm_call = calls[calls["strike"] > latest_price].iloc[0]
-    itm_put = puts[puts["strike"] < latest_price].iloc[-1]
+    # Ensure valid options are available
+    if calls.empty or puts.empty:
+        return {"Error": "No valid options data available."}
+
+    # Select OTM Call and ITM Put safely
+    try:
+        otm_call = calls[calls["strike"] > latest_price].iloc[0]
+        itm_put = puts[puts["strike"] < latest_price].iloc[-1]
+    except IndexError:
+        return {"Error": "No suitable OTM call or ITM put found."}
 
     # Option parameters
     K_otm = otm_call["strike"]
@@ -59,7 +80,7 @@ def options_trading_strategy():
     iv_itm = implied_volatility(latest_price, K_itm, T, r, itm_put["lastPrice"], "put")
 
     if np.isnan(iv_otm) or np.isnan(iv_itm):
-        return "Failed to compute IVs."
+        return {"Error": "Failed to compute Implied Volatility."}
 
     # Compute Black-Scholes Price
     price_otm = black_scholes(latest_price, K_otm, T, r, iv_otm, "call")
@@ -82,7 +103,7 @@ def options_trading_strategy():
         "Remaining Capital": capital
     }
 
-# Backtesting Strategy
+# Backtesting Strategy with Moving Averages
 def backtest():
     stock_data = fetch_stock_data(period="2y")
     stock_data["MA_50"] = stock_data["Close"].rolling(50).mean()
