@@ -83,27 +83,40 @@ class RelianceStockAnalyzer:
         self.macd = exp1 - exp2
         self.signal = self.macd.ewm(span=signal_window, adjust=False).mean()
     
-    def analyze_correlations(self) -> Dict[str, float]:
-        """Analyze correlations between indicators and stock price"""
-        if self.stock_data is None or self.moving_averages == {}:
-            raise ValueError("Stock data and moving averages must be calculated first.")
-            
-        correlations = {}
-        for ma_name, ma_value in self.moving_averages.items():
-            correlations[f'{ma_name} Correlation'] = ma_value.corr(self.stock_data['Close'])
-            
-        if self.rsi is not None:
-            correlations['RSI Correlation'] = self.rsi.corr(self.stock_data['Close'])
-            
-        if self.bollinger_bands:
-            for band_name, band_value in self.bollinger_bands.items():
-                correlations[f'{band_name} Correlation'] = band_value.corr(self.stock_data['Close'])
-                
-        if self.macd is not None:
-            correlations['MACD Correlation'] = self.macd.corr(self.stock_data['Close'])
-            
-        return correlations
-
+   def analyze_correlations(self) -> Dict[str, float]:
+    """Analyze correlations between indicators and stock price"""
+    if self.stock_data is None or self.moving_averages == {}:
+        raise ValueError("Stock data and moving averages must be calculated first.")
+        
+    correlations = {}
+    
+    # Calculate correlations for moving averages
+    for ma_name, ma_value in self.moving_averages.items():
+        # Ensure we only use non-NaN values
+        valid_data = ma_value.dropna()
+        if not valid_data.empty:
+            correlations[f'{ma_name} Correlation'] = valid_data.corr(self.stock_data['Close'])
+    
+    # Calculate RSI correlation if available
+    if self.rsi is not None:
+        valid_rsi = self.rsi.dropna()
+        if not valid_rsi.empty:
+            correlations['RSI Correlation'] = valid_rsi.corr(self.stock_data['Close'])
+    
+    # Calculate Bollinger Bands correlations if available
+    if self.bollinger_bands:
+        for band_name, band_value in self.bollinger_bands.items():
+            valid_band = band_value.dropna()
+            if not valid_band.empty:
+                correlations[f'{band_name} Correlation'] = valid_band.corr(self.stock_data['Close'])
+    
+    # Calculate MACD correlation if available
+    if self.macd is not None:
+        valid_macd = self.macd.dropna()
+        if not valid_macd.empty:
+            correlations['MACD Correlation'] = valid_macd.corr(self.stock_data['Close'])
+    
+    return correlations
 def main():
     """Main Streamlit application"""
     st.title('Reliance Stock Technical Analysis')
