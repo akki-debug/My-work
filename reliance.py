@@ -6,6 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.stats import norm
 from typing import Dict, Tuple, List
+import time
 
 class OptionsStrategy:
     def __init__(self):
@@ -15,9 +16,7 @@ class OptionsStrategy:
     def calculate_implied_volatility(self, S: float, K: float, T: float, 
                                    r: float, market_price: float, 
                                    option_type: str = 'call') -> float:
-        """
-        Calculate implied volatility using Newton-Raphson method
-        """
+        """Calculate implied volatility using Newton-Raphson method"""
         def black_scholes(S: float, K: float, T: float, r: float, 
                          sigma: float, option_type: str) -> float:
             d1 = (np.log(S/K) + (r + sigma**2/2)*T)/(sigma*np.sqrt(T))
@@ -36,7 +35,12 @@ class OptionsStrategy:
         
         # Newton-Raphson iteration
         sigma = 0.2  # Initial guess
-        while abs(objective(sigma)) > 1e-6 and abs(derivative(sigma)) > 1e-6:
+        max_iter = 100
+        for _ in range(max_iter):
+            if abs(objective(sigma)) < 1e-6:
+                break
+            if abs(derivative(sigma)) < 1e-6:
+                raise ValueError("Derivative too close to zero")
             sigma = sigma - objective(sigma)/derivative(sigma)
             
         return sigma
@@ -55,7 +59,7 @@ class OptionsStrategy:
         sharpe = excess_returns.mean()/returns.std()*np.sqrt(252)
         return sharpe
     
-    def calculate_max_drawdown(self, equity_curve: pd.Series) -> Tuple[float, int, int]:
+    def calculate_max_drawdown(self, equity_curve: pd.Series) -> Tuple[float, int, int, int]:
         """Calculate maximum drawdown and its duration"""
         peak = equity_curve.cummax()
         drawdown = equity_curve/peak - 1
@@ -68,89 +72,102 @@ class OptionsStrategy:
 class StrategyBacktest:
     def __init__(self):
         self.exceptions = []
+        self.max_retries = 3
+        self.retry_delay = 2  # seconds
         
     def get_options_data(self, ticker: str, date: datetime) -> pd.DataFrame:
-        """Get options data for Reliance"""
-        try:
-            opt = yf.Ticker(f"{ticker}.NS")
-            options = opt.options
-            df = pd.DataFrame()
+        """Get options data for Reliance with retry mechanism"""
+        for attempt in range(self.max_retries):
+            try:
+                opt = yf.Ticker(f"{ticker}.NS")
+                options = opt.options
+                
+                if not options:
+                    raise ValueError("No options data available")
+                
+                df = pd.DataFrame()
+                for expiry in options[:3]:
+                    opt_data = opt.option_chain(expiry)
+                    
+                    if opt_data.calls.empty or opt_data.puts.empty:
+                        continue
+                    
+                    calls = opt_data.calls[['strike', 'impliedVolatility', 'lastPrice']]
+                    puts = opt_data.puts[['strike', 'impliedVolatility', 'lastPrice']]
+                    
+                    calls['expiry'] = pd.to_datetime(expiry)
+                    puts['expiry'] = pd.to_datetime(expiry)
+                    
+                    df = pd.concat([df, calls, puts])
+                
+                if df.empty:
+                    raise ValueError("No valid options data found")
+                
+                return df.sort_values('expiry')
             
-            for expiry in options[:3]:  # Get next 3 months' options
-                opt_data = opt.option_chain(expiry)
-                
-                calls = opt_data.calls[['strike', 'impliedVolatility', 'lastPrice']]
-                puts = opt_data.puts[['strike', 'impliedVolatility', 'lastPrice']]
-                
-                calls['expiry'] = pd.to_datetime(expiry)
-                puts['expiry'] = pd.to_datetime(expiry)
-                
-                df = pd.concat([df, calls, puts])
-            
-            return df.sort_values('expiry')
-        except Exception as e:
-            self.exceptions.append(f"Error getting options data: {str(e)}")
-            return pd.DataFrame()
+            except Exception as e:
+                if attempt == self.max_retries - 1:
+                    self.exceptions.append(f"Error getting options data (attempt {attempt + 1}): {str(e)}")
+                    return pd.DataFrame()
+                time.sleep(self.retry_delay)
+                continue
     
     def execute_strategy(self, ticker: str, start_date: datetime, end_date: datetime):
-        """Execute the strategy"""
+        """Execute the strategy with improved error handling"""
         try:
-            # Get historical prices
             stock_data = yf.download(ticker + '.NS', start=start_date, end=end_date)
             
-            # Initialize strategy objects
+            if stock_data.empty:
+                raise ValueError("No stock data available")
+            
             strategy = OptionsStrategy()
             backtest = StrategyBacktest()
             
-            # Calculate moving averages
             mas = strategy.calculate_moving_averages(stock_data['Close'])
             
-            # Initialize performance metrics
             equity_curve = pd.Series(index=stock_data.index)
             positions = pd.DataFrame(index=stock_data.index)
             
-            # Monthly strategy execution
             monthly_dates = pd.date_range(start=start_date, end=end_date, freq='MS')
             
             for date in monthly_dates:
-                # Get options data for this month
                 opt_data = backtest.get_options_data(ticker, date)
                 
-                if len(opt_data) == 0:
+                if opt_data.empty:
                     continue
                     
-                # Find OTM and ITM options
                 current_price = stock_data.loc[date, 'Close']
                 otm_calls = opt_data[opt_data['strike'] > current_price]
                 itm_puts = opt_data[opt_data['strike'] < current_price]
                 
                 if len(otm_calls) > 0 and len(itm_puts) > 0:
-                    # Execute strategy
                     otm_strike = otm_calls.iloc[0]['strike']
                     itm_strike = itm_puts.iloc[-1]['strike']
                     
-                    # Calculate implied volatility
-                    iv_otm = strategy.calculate_implied_volatility(
-                        current_price, otm_strike, 
-                        (opt_data['expiry'].iloc[0] - date).days/252,
-                        strategy.risk_free_rate, 
-                        opt_data[opt_data['strike'] == otm_strike].iloc[0]['lastPrice'],
-                        'call'
-                    )
-                    
-                    iv_itm = strategy.calculate_implied_volatility(
-                        current_price, itm_strike,
-                        (opt_data['expiry'].iloc[0] - date).days/252,
-                        strategy.risk_free_rate,
-                        opt_data[opt_data['strike'] == itm_strike].iloc[0]['lastPrice'],
-                        'put'
-                    )
-                    
-                    # Record positions and equity
-                    positions.loc[date, 'OTM_Call_Strike'] = otm_strike
-                    positions.loc[date, 'ITM_Put_Strike'] = itm_strike
-                    positions.loc[date, 'OTM_Call_IV'] = iv_otm
-                    positions.loc[date, 'ITM_Put_IV'] = iv_itm
+                    try:
+                        iv_otm = strategy.calculate_implied_volatility(
+                            current_price, otm_strike, 
+                            (opt_data['expiry'].iloc[0] - date).days/252,
+                            strategy.risk_free_rate, 
+                            opt_data[opt_data['strike'] == otm_strike].iloc[0]['lastPrice'],
+                            'call'
+                        )
+                        
+                        iv_itm = strategy.calculate_implied_volatility(
+                            current_price, itm_strike,
+                            (opt_data['expiry'].iloc[0] - date).days/252,
+                            strategy.risk_free_rate,
+                            opt_data[opt_data['strike'] == itm_strike].iloc[0]['lastPrice'],
+                            'put'
+                        )
+                        
+                        positions.loc[date, 'OTM_Call_Strike'] = otm_strike
+                        positions.loc[date, 'ITM_Put_Strike'] = itm_strike
+                        positions.loc[date, 'OTM_Call_IV'] = iv_otm
+                        positions.loc[date, 'ITM_Put_IV'] = iv_itm
+                    except Exception as e:
+                        self.exceptions.append(f"Error calculating IV at {date}: {str(e)}")
+                        continue
             
             return {
                 'moving_averages': mas,
@@ -192,6 +209,17 @@ def create_streamlit_app():
                 st.write("Exceptions encountered:")
                 for exception in result['exceptions']:
                     st.error(exception)
+                    
+            # Display performance metrics
+            if not result['equity_curve'].empty:
+                sharpe = OptionsStrategy().calculate_sharpe_ratio(result['equity_curve'])
+                max_dd, dd_duration, dd_start, dd_end = OptionsStrategy().calculate_max_drawdown(result['equity_curve'])
+                
+                st.write("\nPerformance Metrics:")
+                st.write(f"Sharpe Ratio: {sharpe:.2f}")
+                st.write(f"Maximum Drawdown: {max_dd*100:.2f}%")
+                st.write(f"Drawdown Duration: {dd_duration} days")
+                st.write(f"Drawdown Period: {dd_start.strftime('%Y-%m-%d')} to {dd_end.strftime('%Y-%m-%d')}")
 
 if __name__ == "__main__":
     create_streamlit_app()
