@@ -4,9 +4,11 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import RendererAgg
 from scipy.stats import norm
 from typing import Dict, List, Tuple
-from matplotlib.backends.backend_agg import RendererAgg
+
+# Create the lock object
 _lock = RendererAgg.lock
 
 class RelianceOptionsStrategy:
