@@ -83,7 +83,7 @@ class RelianceStockAnalyzer:
         self.macd = exp1 - exp2
         self.signal = self.macd.ewm(span=signal_window, adjust=False).mean()
     
-   def analyze_correlations(self) -> Dict[str, float]:
+    def analyze_correlations(self) -> Dict[str, float]:
     """Analyze correlations between indicators and stock price"""
     if self.stock_data is None or self.moving_averages == {}:
         raise ValueError("Stock data and moving averages must be calculated first.")
