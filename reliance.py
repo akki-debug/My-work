@@ -3,11 +3,12 @@ import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
+from typing import Dict, Optional
 
 class RelianceStockAnalyzer:
     def __init__(self):
-        self.stock_data = None
-        self.moving_averages = {}
+        self.stock_data: Optional[pd.DataFrame] = None
+        self.moving_averages: Dict[str, pd.Series] = {}
         
     def fetch_stock_data(self, start_date: str, end_date: str) -> None:
         """Fetch Reliance Industries stock data"""
@@ -20,7 +21,7 @@ class RelianceStockAnalyzer:
         except Exception as e:
             raise Exception(f"Error fetching stock data: {str(e)}")
         
-    def calculate_moving_averages(self) -> Dict[str, float]:
+    def calculate_moving_averages(self) -> Dict[str, pd.Series]:
         """Calculate 50, 100, and 200 day moving averages"""
         if self.stock_data is None:
             raise ValueError("Stock data not loaded. Please fetch data first.")
