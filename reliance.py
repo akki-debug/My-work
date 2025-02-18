@@ -36,7 +36,7 @@ class RelianceOptionsStrategy:
             'MA_200': self.stock_data['Close'].rolling(window=200).mean()
         }
         return self.moving_averages
-        
+
     def bsm_option_price(self, 
                         S: float, 
                         K: float, 
@@ -52,7 +52,7 @@ class RelianceOptionsStrategy:
             return S*norm.cdf(d1) - K*np.exp(-r*T)*norm.cdf(d2)
         else:
             return K*np.exp(-r*T)*norm.cdf(-d2) - S*norm.cdf(-d1)
-        
+
     def implied_volatility(self, 
                           market_price: float, 
                           S: float, 
@@ -69,7 +69,6 @@ class RelianceOptionsStrategy:
             theoretical_price = self.bsm_option_price(
                 S, K, T, r, sigma_mid, option_type)
             
-            # Convert to float for comparison
             theoretical_price = float(theoretical_price)
             market_price = float(market_price)
             
@@ -94,32 +93,30 @@ def execute_strategy(strategy: RelianceOptionsStrategy,
     for date in pd.date_range(start=strategy.stock_data.index[0], 
                              end=strategy.stock_data.index[-1],
                              freq='MS'):  # Monthly frequency
-        
         try:
-            current_price = strategy.stock_data.loc[date, 'Close']
-            if pd.isna(current_price):
+            date_str = date.strftime('%Y-%m-%d')
+            current_price = strategy.stock_data.loc[date_str, 'Close']
+            
+            if pd.isna(current_price).any():
                 st.error(f"Missing price data for {date}")
                 continue
                 
-            ma_values = {k: v.loc[date] for k, v in strategy.moving_averages.items()}
+            ma_values = {k: v.loc[date_str] for k, v in strategy.moving_averages.items()}
             
+            if any(pd.isna(ma_values.values()).any()):
+                st.error(f"Missing moving average data for {date}")
+                continue
+                
             atm_strike = round(current_price / 100) * 100
             otm_call_strike = atm_strike + 100
             itm_put_strike = atm_strike - 100
             
-            # Debugging information
-            st.write(f"Processing {date}:")
-            st.write(f"  Current Price: {current_price}")
-            st.write(f"  ATM Strike: {atm_strike}")
-            st.write(f"  OTM Call Strike: {otm_call_strike}")
-            st.write(f"  ITM Put Strike: {itm_put_strike}")
-            
             try:
                 iv_call = strategy.implied_volatility(
-                    market_price=100,  # Assuming standardized contract size
+                    market_price=100,
                     S=current_price,
                     K=otm_call_strike,
-                    T=30/365,  # One month expiry
+                    T=30/365,
                     r=risk_free_rate,
                     option_type='call')
                 
