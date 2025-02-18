@@ -4,12 +4,8 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_agg import RendererAgg
 from scipy.stats import norm
 from typing import Dict, List, Tuple
-
-# Create the lock object
-_lock = RendererAgg.lock
 
 class RelianceOptionsStrategy:
     def __init__(self):
@@ -34,28 +30,58 @@ class RelianceOptionsStrategy:
         if self.stock_data is None:
             raise ValueError("Stock data not loaded. Please fetch data first.")
             
-        # Ensure we have enough data for all moving averages
-        if len(self.stock_data) < 200:
-            raise ValueError("Insufficient data for 200-day moving average")
-            
         self.moving_averages = {
-            'MA_50': self.stock_data['Close'].rolling(window=50).mean().iloc[49:],
-            'MA_100': self.stock_data['Close'].rolling(window=100).mean().iloc[99:],
-            'MA_200': self.stock_data['Close'].rolling(window=200).mean().iloc[199:]
+            'MA_50': self.stock_data['Close'].rolling(window=50).mean(),
+            'MA_100': self.stock_data['Close'].rolling(window=100).mean(),
+            'MA_200': self.stock_data['Close'].rolling(window=200).mean()
         }
-        
-        # Align the moving averages to start from the same date
-        start_date = max(self.moving_averages['MA_200'].index[0],
-                        self.moving_averages['MA_100'].index[0],
-                        self.moving_averages['MA_50'].index[0])
-        
-        self.moving_averages = {
-            'MA_50': self.moving_averages['MA_50'][start_date:],
-            'MA_100': self.moving_averages['MA_100'][start_date:],
-            'MA_200': self.moving_averages['MA_200'][start_date:]
-        }
-        
         return self.moving_averages
+        
+    def bsm_option_price(self, 
+                        S: float, 
+                        K: float, 
+                        T: float, 
+                        r: float, 
+                        sigma: float, 
+                        option_type: str) -> float:
+        """Calculate European option price using Black-Scholes-Merton model"""
+        d1 = (np.log(S/K) + (r + sigma**2/2)*T)/(sigma*np.sqrt(T))
+        d2 = d1 - sigma*np.sqrt(T)
+        
+        if option_type == 'call':
+            return S*norm.cdf(d1) - K*np.exp(-r*T)*norm.cdf(d2)
+        else:
+            return K*np.exp(-r*T)*norm.cdf(-d2) - S*norm.cdf(-d1)
+        
+    def implied_volatility(self, 
+                          market_price: float, 
+                          S: float, 
+                          K: float, 
+                          T: float, 
+                          r: float, 
+                          option_type: str) -> float:
+        """Calculate implied volatility using binary search"""
+        tol = 1e-5
+        sigma_min, sigma_max = 0.001, 2.0
+        
+        while sigma_max - sigma_min > tol:
+            sigma_mid = (sigma_min + sigma_max)/2
+            theoretical_price = self.bsm_option_price(
+                S, K, T, r, sigma_mid, option_type)
+            
+            # Convert to float for comparison
+            theoretical_price = float(theoretical_price)
+            market_price = float(market_price)
+            
+            if abs(theoretical_price - market_price) < tol:
+                return sigma_mid
+                
+            elif theoretical_price < market_price:
+                sigma_min = sigma_mid
+            else:
+                sigma_max = sigma_mid
+                
+        return (sigma_min + sigma_max)/2
 
 def execute_strategy(strategy: RelianceOptionsStrategy,
                    transaction_cost: float = 0.001,
@@ -75,16 +101,8 @@ def execute_strategy(strategy: RelianceOptionsStrategy,
                 st.error(f"Missing price data for {date}")
                 continue
                 
-            # Get moving averages for this date
-            ma_values = {}
-            for ma_name, ma_series in strategy.moving_averages.items():
-                if date in ma_series.index:
-                    ma_values[ma_name] = ma_series.loc[date]
+            ma_values = {k: v.loc[date] for k, v in strategy.moving_averages.items()}
             
-            if not ma_values:
-                st.error(f"No moving averages available for {date}")
-                continue
-                
             atm_strike = round(current_price / 100) * 100
             otm_call_strike = atm_strike + 100
             itm_put_strike = atm_strike - 100
@@ -220,24 +238,22 @@ def main():
         
         # Plot stock price with moving averages
         st.header('Stock Price with Moving Averages')
-        with _lock:  # Add thread safety for matplotlib
-            fig, ax = plt.subplots(figsize=(12, 6))
-            strategy.stock_data['Close'].plot(ax=ax, label='Reliance Close Price')
-            for ma_name, ma_value in strategy.moving_averages.items():
-                ma_value.plot(ax=ax, label=ma_name)
-            ax.set_title('Reliance Stock Price with Moving Averages')
-            ax.legend(loc='upper left')
-            ax.grid(True)
-            st.pyplot(fig)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        strategy.stock_data['Close'].plot(ax=ax, label='Reliance Close Price')
+        for ma_name, ma_value in strategy.moving_averages.items():
+            ma_value.plot(ax=ax, label=ma_name)
+        ax.set_title('Reliance Stock Price with Moving Averages')
+        ax.legend(loc='upper left')
+        ax.grid(True)
+        st.pyplot(fig)
         
         # Plot equity curve
         st.header('Strategy Equity Curve')
-        with _lock:  # Add thread safety for matplotlib
-            fig, ax = plt.subplots(figsize=(12, 6))
-            pd.Series(results['equity_curve']).plot(ax=ax)
-            ax.set_title('Strategy Equity Curve')
-            ax.grid(True)
-            st.pyplot(fig)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        pd.Series(results['equity_curve']).plot(ax=ax)
+        ax.set_title('Strategy Equity Curve')
+        ax.grid(True)
+        st.pyplot(fig)
         
     except Exception as e:
         st.error(f"Error executing strategy: {str(e)}")
